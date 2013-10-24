@@ -21,6 +21,8 @@ var f_socket_type = flag.String("socket-type", "stream",
 	"Type of UNIX-domain socket connection (stream/dgram)")
 var f_reconnect_time = flag.Int("reconnect-time", 1,
 	"Time to wait (in seconds) before reconnect")
+var f_init_reconnect = flag.Bool("retry-initial-connect", true,
+	"Try reconnecting if the initial connection fails")
 
 // Initialize
 func main() {
@@ -60,7 +62,7 @@ func run(socketpath string, sockettype string, prefix string) {
 	conn, err := net.Dial(sockettype, socketpath)
 	if err != nil {
 		log.Print("Connection failed: ", err.Error())
-		if nr_conns == 0 {
+		if nr_conns == 0 && !*f_init_reconnect {
 			// No successful connections have happened, so we haven't
 			// read anything from STDIN and we can safely exit now.
 			os.Exit(1)
