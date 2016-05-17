@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,8 @@ var f_reconnect_time = flag.Int("reconnect-time", 1,
 	"Time to wait (in seconds) before reconnect")
 var f_init_reconnect = flag.Bool("retry-initial-connect", true,
 	"Try reconnecting if the initial connection fails")
+var f_esc_null = flag.Bool("escape-null", true,
+	"Escapes NULL characters in output as <NUL>")
 
 // Initialize
 func main() {
@@ -97,8 +100,14 @@ func run(socketpath string, sockettype string, prefix string) {
 			break
 		}
 
+		// Escape NULLs in output string
+		stxt := scanner.Text()
+		if *f_esc_null {
+			stxt = strings.Replace(stxt, "\x00", "<NUL>", -1);
+		}
+
 		// Queue data for writing
-		strout = prefix + scanner.Text() + "\n"
+		strout = prefix + stxt + "\n"
 	}
 
 	// Reader errors result in immediate exit
