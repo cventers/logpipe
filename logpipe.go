@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Define flags
@@ -22,6 +23,7 @@ var f_socket_type = flag.String("socket-type", "stream",
 	"Type of UNIX-domain socket connection (stream/dgram)")
 var f_reconnect_time = flag.Int("reconnect-time", 1,
 	"Time to wait (in seconds) before reconnect")
+var f_wrap = flag.Int("wrap", 0, "Characters after which to wrap the message")
 var f_init_reconnect = flag.Bool("retry-initial-connect", true,
 	"Try reconnecting if the initial connection fails")
 var f_esc_null = flag.Bool("escape-null", true,
@@ -75,6 +77,8 @@ func run(socketpath string, sockettype string, prefix string) {
 	}
 	nr_conns++
 
+	var plen = len(prefix) + 1
+
 	scanner := bufio.NewScanner(os.Stdin)
 	writer := bufio.NewWriter(conn)
 
@@ -106,8 +110,31 @@ func run(socketpath string, sockettype string, prefix string) {
 			stxt = strings.Replace(stxt, "\x00", "<NUL>", -1);
 		}
 
-		// Queue data for writing
-		strout = prefix + stxt + "\n"
+		if *f_wrap == 0 || len(stxt) + plen < *f_wrap {
+			// Queue data for writing
+			strout = prefix + stxt + "\n"
+		} else {
+			// Prepare string builder
+			var sb strings.Builder
+			sb.WriteString(prefix)
+			var lineBytes = plen
+
+			// Wrap stxt, respecting UTF-8 rune boundaries
+			for _, runeValue := range stxt {
+				var runeBytes = utf8.RuneLen(runeValue)
+				if lineBytes + runeBytes > *f_wrap {
+					sb.WriteString("\n")
+					sb.WriteString(prefix)
+					lineBytes = plen
+				}
+				lineBytes += runeBytes
+				sb.WriteRune(runeValue)
+			}
+			sb.WriteString("\n")
+
+			// Flush string
+			strout = sb.String()
+		}
 	}
 
 	// Reader errors result in immediate exit
