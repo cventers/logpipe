@@ -9,14 +9,19 @@ import (
 	"bufio"
 	"flag"
 	"log"
+	"fmt"
 	"net"
+	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
 
 // Define flags
+var f_logpath = flag.String("lp-logfile", "", "Path to the logpipe log")
 var f_socketpath = flag.String("socket", "", "Path to the log socket")
 var f_prefix = flag.String("prefix", "", "Prefix to add to lines")
 var f_socket_type = flag.String("socket-type", "stream",
@@ -33,6 +38,18 @@ var f_esc_null = flag.Bool("escape-null", true,
 func main() {
 	flag.Parse()
 
+	// Log exit due to signals
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigs
+		log.Printf("Received signal %v", sig)
+		os.Exit(0)
+	}()
+
+	// Add PID to log
+	log.SetPrefix(fmt.Sprintf("[%d] ", os.Getpid()))
+
 	if *f_socketpath == "" {
 		log.Fatal("-socket is a required argument")
 	}
@@ -44,6 +61,26 @@ func main() {
 		socktype = "unixgram"
 	} else {
 		log.Fatal("-socket-type must be stream or dgram")
+	}
+
+	if *f_logpath != "" {
+		logfile, err := os.OpenFile(*f_logpath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			log.Fatalf("Error opening logfile(%s): %v", *f_logpath, err)
+		}
+		defer logfile.Close()
+
+		log.SetOutput(io.MultiWriter(os.Stderr, logfile))
+
+		// Dump arguments
+		log.Printf("Opened lp-logfile %s", *f_logpath)
+		log.Printf("Options:")
+		log.Printf("\tsocket='%s' (%s)", *f_socketpath, *f_socket_type)
+		log.Printf("\treconnect-time=%d", *f_reconnect_time)
+		log.Printf("\tretry-initial-connect=%v", *f_init_reconnect)
+		log.Printf("\tprefix='%s'", *f_prefix)
+		log.Printf("\twrap=%d", *f_wrap)
+		log.Printf("\tescape-null=%v", *f_esc_null)
 	}
 
 	for {
@@ -76,6 +113,7 @@ func run(socketpath string, sockettype string, prefix string) {
 		}
 	}
 	nr_conns++
+	log.Printf("Connected to socket %v (#%d)", socketpath, nr_conns)
 
 	var plen = len(prefix) + 1
 
@@ -143,6 +181,7 @@ func run(socketpath string, sockettype string, prefix string) {
 	}
 
 	// On EOF, we just bail...
+	log.Print("Reached EOF on STDIN")
 	os.Exit(0)
 }
 
