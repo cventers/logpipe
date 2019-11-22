@@ -18,7 +18,11 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+	"encoding/json"
 )
+
+type jsonAttrSet map[string]string
+var jsonAttrs = make(jsonAttrSet)
 
 // Define flags
 var f_logpath = flag.String("lp-logfile", "", "Path to the logpipe log")
@@ -33,9 +37,35 @@ var f_init_reconnect = flag.Bool("retry-initial-connect", true,
 	"Try reconnecting if the initial connection fails")
 var f_esc_null = flag.Bool("escape-null", true,
 	"Escapes NULL characters in output as <NUL>")
+var f_output_mode = flag.String("output-mode", "line", "Output mode (line/json)")
+
+func (i *jsonAttrSet) String() string {
+	r, err := json.Marshal(*i)
+	if err != nil {
+		return fmt.Sprintf("jsonAttrSet Marshal error: %v", err)
+	} else {
+		return string(r)
+	}
+}
+
+func (i *jsonAttrSet) Set(value string) error {
+	p := strings.SplitN(value, "=", 2)
+	if len(p) < 2 {
+		log.Fatalf("-json-attr '%s' must be specified as k=v pair", value)
+	}
+	k := p[0]
+	v := p[1]
+	if _, found := (*i)[k]; found {
+		log.Fatalf("-json-attr '%s' specified multiple times", k)
+	}
+	(*i)[k] = v
+	return nil
+}
 
 // Initialize
 func main() {
+	flag.Var(&jsonAttrs, "json-attr", "One or more k=v pairs to include " +
+		"in output messages")
 	flag.Parse()
 
 	// Log exit due to signals
@@ -63,6 +93,15 @@ func main() {
 		log.Fatal("-socket-type must be stream or dgram")
 	}
 
+	if *f_output_mode == "line" {
+		if len(jsonAttrs) > 0 {
+			log.Fatal("-json-attr cannot be specified unless -output-mode is json")
+		}
+	} else if *f_output_mode == "json" {
+	} else {
+		log.Fatalf("-output-mode '%s' must be line or json", *f_output_mode)
+	}
+
 	if *f_logpath != "" {
 		logfile, err := os.OpenFile(*f_logpath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
@@ -81,6 +120,8 @@ func main() {
 		log.Printf("\tprefix='%s'", *f_prefix)
 		log.Printf("\twrap=%d", *f_wrap)
 		log.Printf("\tescape-null=%v", *f_esc_null)
+		log.Printf("\toutput-mode=%s", *f_output_mode)
+		log.Printf("\tjson-attr=%s", jsonAttrs.String())
 	}
 
 	for {
@@ -99,6 +140,19 @@ func main() {
 var nr_conns = 0
 var strout string
 
+func makeOutString(instr string) string {
+	if *f_output_mode == "line" {
+		return instr
+	} else {
+		jsonAttrs["message"] = instr
+		o, err := json.Marshal(jsonAttrs)
+		if err != nil {
+			log.Fatalf("json Marshal error: %v", err)
+		}
+		return string(o)
+	}
+}
+
 func run(socketpath string, sockettype string, prefix string) {
 	// Connect to UNIX-domain socket
 	conn, err := net.Dial(sockettype, socketpath)
@@ -115,12 +169,17 @@ func run(socketpath string, sockettype string, prefix string) {
 	nr_conns++
 	log.Printf("Connected to socket %v (#%d)", socketpath, nr_conns)
 
-	var plen = len(prefix) + 1
+	// Precompute prefix length. Include newline if we are in line output mode
+	var plen = len(prefix)
+	if *f_output_mode == "line" {
+		plen = plen + 1
+	}
 
-	scanner := bufio.NewScanner(os.Stdin)
+	reader := bufio.NewReader(os.Stdin)
 	writer := bufio.NewWriter(conn)
 
 	// Keep writing data
+	var readerErr error
 	for {
 		// Build output string
 		if strout != "" {
@@ -138,22 +197,25 @@ func run(socketpath string, sockettype string, prefix string) {
 		}
 
 		// If we didn't get any more data, exit the loop
-		if !scanner.Scan() {
-			break
+		var stxt string
+		stxt, readerErr = reader.ReadString('\n')
+		if len(stxt) < 1 {
+			break;
 		}
+		stxt = stxt[:len(stxt)-1]
 
 		// Escape NULLs in output string
-		stxt := scanner.Text()
 		if *f_esc_null {
 			stxt = strings.Replace(stxt, "\x00", "<NUL>", -1);
 		}
 
 		if *f_wrap == 0 || len(stxt) + plen < *f_wrap {
 			// Queue data for writing
-			strout = prefix + stxt + "\n"
+			strout = makeOutString(prefix + stxt) + "\n"
 		} else {
-			// Prepare string builder
+			// Prepare string builders
 			var sb strings.Builder
+			var ob strings.Builder
 			sb.WriteString(prefix)
 			var lineBytes = plen
 
@@ -161,22 +223,26 @@ func run(socketpath string, sockettype string, prefix string) {
 			for _, runeValue := range stxt {
 				var runeBytes = utf8.RuneLen(runeValue)
 				if lineBytes + runeBytes > *f_wrap {
-					sb.WriteString("\n")
+					ostr := makeOutString(sb.String())
+					ob.WriteString(ostr)
+					ob.WriteString("\n")
+					sb.Reset()
 					sb.WriteString(prefix)
 					lineBytes = plen
 				}
 				lineBytes += runeBytes
 				sb.WriteRune(runeValue)
 			}
-			sb.WriteString("\n")
+			ostr := makeOutString(sb.String())
+			ob.WriteString(ostr)
+			ob.WriteString("\n")
 
 			// Flush string
-			strout = sb.String()
+			strout = ob.String()
 		}
 	}
 
-	// Reader errors result in immediate exit
-	if err := scanner.Err(); err != nil {
+	if readerErr != nil && readerErr != io.EOF {
 		log.Fatal(err)
 	}
 
